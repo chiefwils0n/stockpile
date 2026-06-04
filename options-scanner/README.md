@@ -31,6 +31,8 @@ For repo-wide setup (`uv sync`, etc.) see the
 **Videos:**
 [Option Scanner by Claude (Python, GitHub)](https://youtu.be/0H7BGJ3rJoQ)
 · [Find the Best Options with Schwab and Claude](https://youtu.be/-MsAMYX0kAM)
+· [Find the Best Covered Call — Options Scanner](https://youtu.be/WVGH-Hjbnjs?si=w6FqHtbGoJsx887d)
+· [I Asked Claude to Roll My Covered Call](https://youtu.be/qBNh6DIUSQQ?si=6M5g8Eu0mnODyb3g)
 
 ## Web UI
 
@@ -54,8 +56,10 @@ A browser tab opens at `http://localhost:8501` with six tabs:
   a "Top" column showing the same rank, and a top candidates table
   ranked across all expirations. The surface chart marks contracts that
   fed the fit (filled dots) vs. those a filter excluded (hollow), adds a
-  **Single / All expirations** view toggle to see the whole fitted
-  surface at once, and a **Surface-fit diagnostics** expander showing
+  **Single / All expirations / 3D surface** view toggle (the 3D option
+  renders the whole chain as an interactive strike × DTE × IV plot you
+  can drag to rotate, colored by IV+pp deviation), and a
+  **Surface-fit diagnostics** expander showing
   where contracts dropped out of the fit and each expiration's fit
   quality. A Market View card explains what your
   Direction × Option Type selection screens for, and selecting any
@@ -74,6 +78,15 @@ A browser tab opens at `http://localhost:8501` with six tabs:
   translating the top IV-rich pick into explicit SELL TO OPEN / ROLL
   instructions. The validator runs automatically on upload and shows
   any problems before you scan.
+
+  Instead of a CSV you can switch the **Input source** to **Watchlist**
+  and type a basket of tickers (commas, spaces, or new lines) — no
+  broker account needed. Watchlists can be **saved by name** and
+  reloaded later along with the filters they were saved with; a few
+  starter baskets (Mega Caps, Semiconductors, High IV, Index ETFs) ship
+  with the app, and your own saved lists stay local. Both input sources
+  also produce a cross-ticker IV+pp leaderboard above the per-ticker
+  results.
 - **Spreads** — power-user view of 13 multi-leg strategies ranked by
   risk/reward subject to a POP threshold. Click a row to see the
   payoff diagram (at-expiry + current value).
@@ -581,10 +594,6 @@ Planned improvements, roughly in priority order:
 - **Skew chart** — plot IV by strike for a single expiration to
   visualize the put/call skew. Shows how the market is pricing
   downside vs. upside risk at a glance.
-
-- **Watchlist** — save a list of tickers to scan without uploading a
-  brokerage CSV each time. Useful for monitoring a fixed set of
-  stocks on a regular basis.
 
 - **Portfolio-level Greeks summary** — aggregate delta, theta, and
   vega across all open positions so you can see total book exposure
