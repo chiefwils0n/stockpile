@@ -1,10 +1,19 @@
-import time, hashlib, tomllib
+import os, time, hashlib, tomllib
 from pathlib import Path
 from flask import Flask, jsonify, request, render_template
 from flask_cors import CORS
 from data_source import fetch_ohlcv, fetch_schwab_live_price, _DATASOURCE_REGISTRY
 app = Flask(__name__)
-CORS(app, resources={r"/api/*": {"origins": ["http://localhost:5000", "http://127.0.0.1:5000"]}})
+
+def _dashboard_port():
+    """Dashboard TCP port. Override with OSC_DASHBOARD_PORT on hosts where
+    5000 is already taken; the scanner's Live Charts embed reads the same var."""
+    raw = os.environ.get("OSC_DASHBOARD_PORT", "").strip()
+    try: p = int(raw)
+    except ValueError: return 5000
+    return p if 1 <= p <= 65535 else 5000
+PORT = _dashboard_port()
+CORS(app, resources={r"/api/*": {"origins": [f"http://localhost:{PORT}", f"http://127.0.0.1:{PORT}"]}})
 _CACHE = {}
 _CACHE_TTL = {"1m":20,"3m":30,"5m":45,"15m":90,"30m":150,"1h":300,"4h":600,"1d":900,"1w":1800,"1M":3600}
 _PRICE_TTL = 300
@@ -14,6 +23,15 @@ def _key(source,symbol,interval,limit): return hashlib.md5(f"{source}:{symbol}:{
 # ── Startup layout (config.toml) ──────────────────────────────────────────────
 _CONFIG_PATH = Path(__file__).resolve().parent / "config.toml"
 _VALID_SOURCES = {"yfinance", "schwab", "hyperliquid"}
+
+# Static, request-arg-free hint appended to Schwab fetch errors. The most
+# common cause is the 7-day token lapsing; point at the fix. (Static text
+# only — never echo the exception, per CWE-209.)
+_SCHWAB_AUTH_HINT = (
+    " Often the Schwab token has expired (7-day limit) — from the stockpile "
+    "directory run: uv run options-scanner/schwab_auth.py, then reload. "
+    "First-time setup: options-scanner/SCHWAB_DATA_SOURCE.md."
+)
 _VALID_TFS = {"1m","3m","5m","15m","30m","1h","4h","1d","1w","1M"}
 _VALID_COUNTS = {1, 2, 4, 6, 8}
 _DEFAULT_LAYOUT = {"default_source": "yfinance", "chart_count": 1, "panes": []}
@@ -74,7 +92,7 @@ def ohlcv():
         app.logger.exception("ohlcv fetch failed (source=%s symbol=%s interval=%s)", source, symbol, interval)
         msg = f"Could not fetch data for '{symbol}' from '{source}'."
         if source == "schwab":
-            msg += " If Schwab isn't set up, see options-scanner/SCHWAB_DATA_SOURCE.md."
+            msg += _SCHWAB_AUTH_HINT
         return jsonify({"ok":False,"error":msg}), 400
 
 @app.route('/api/price')
@@ -85,7 +103,10 @@ def price():
             candles = fetch_ohlcv(source,symbol,'1d',2); _put(ckey,candles)
         except Exception:
             app.logger.exception("price fetch failed (source=%s symbol=%s)", source, symbol)
-            return jsonify({"ok":False,"error":f"Could not fetch price for '{symbol}' from '{source}'"}), 400
+            pmsg = f"Could not fetch price for '{symbol}' from '{source}'."
+            if source == "schwab":
+                pmsg += _SCHWAB_AUTH_HINT
+            return jsonify({"ok":False,"error":pmsg}), 400
     if len(candles) >= 2:
         prev, last = candles[-2]['close'], candles[-1]['close']
     elif candles:
@@ -120,4 +141,4 @@ def sources():
         panes=layout['panes'],
     )
 
-if __name__ == '__main__': app.run(debug=False, host='0.0.0.0', port=5000, threaded=True)
+if __name__ == '__main__': app.run(debug=False, host='0.0.0.0', port=PORT, threaded=True)

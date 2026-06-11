@@ -1,12 +1,34 @@
 """Schwab developer API helpers — mirrors stocks_shared/yahoo.py."""
 
+import json
 import logging
+import re
+import time
 from pathlib import Path
 from types import SimpleNamespace
 
 import pandas as pd
 
 log = logging.getLogger(__name__)
+
+# Schwab refresh tokens expire a fixed 7 days after the initial OAuth login.
+SCHWAB_REFRESH_TOKEN_TTL_DAYS = 7.0
+
+
+def token_age_days(token_file: str) -> float | None:
+    """Days since the token's initial OAuth login, or None if unknown.
+
+    schwab-py token files wrap the OAuth token with a `creation_timestamp`
+    set at login. Age ≥ SCHWAB_REFRESH_TOKEN_TTL_DAYS means the refresh
+    token has definitively expired and schwab_auth.py must be re-run.
+    Returns None when the file is missing, unreadable, or has no timestamp.
+    """
+    try:
+        with open(Path(token_file).expanduser()) as f:
+            ts = json.load(f).get("creation_timestamp")
+        return None if ts is None else (time.time() - float(ts)) / 86400.0
+    except (OSError, ValueError, TypeError):
+        return None
 
 # Schwab uses $NAME for cash-settled index options.
 _SCHWAB_INDEX_TICKERS = frozenset({
@@ -15,10 +37,18 @@ _SCHWAB_INDEX_TICKERS = frozenset({
 })
 
 
+# Class shares (BRK.B, BF.A, …) — NYSE tape uses a dot, Yahoo a dash,
+# Schwab a slash. Accept any of the three and rewrite per provider.
+# (Mirrors _CLASS_SHARE_RE in stocks_shared/yahoo.py.)
+_CLASS_SHARE_RE = re.compile(r"^([A-Z]{1,5})[./-]([A-Z])$")
+
+
 def normalize_ticker_schwab(ticker: str) -> str:
     """Prepend $ for index tickers that Schwab lists under $NAME.
 
-    Trailing ! disables normalization — the bare symbol is used as-is.
+    Class-share notation (BRK.B / BRK-B / BRK/B) is rewritten to Schwab's
+    slash form (BRK/B). Trailing ! disables normalization — the bare
+    symbol is used as-is.
     """
     t = ticker.strip().upper()
     if t.endswith("!"):
@@ -26,9 +56,22 @@ def normalize_ticker_schwab(ticker: str) -> str:
     t = t.lstrip("^$")
     if t in _SCHWAB_INDEX_TICKERS:
         return f"${t}"
+    m = _CLASS_SHARE_RE.match(t)
+    if m:
+        return f"{m.group(1)}/{m.group(2)}"
     return t
 
+# Cache maps (app_key, token_path) -> (client, token_file_mtime). The mtime
+# is the cache-invalidation key: see get_client.
 _client_cache: dict = {}
+
+
+def _token_mtime(token_path: Path) -> float | None:
+    """Modification time of the token file, or None if it doesn't exist."""
+    try:
+        return token_path.stat().st_mtime
+    except OSError:
+        return None
 
 
 def get_client(app_key: str, app_secret: str, callback_url: str,
@@ -40,15 +83,25 @@ def get_client(app_key: str, app_secret: str, callback_url: str,
     refresh token. The refresh token itself has a fixed 7-day TTL from
     the initial OAuth — once expired, every quote/chain call returns
     None and the user must re-run schwab_auth.py.
+
+    The cached client is rebuilt whenever the token file's mtime changes,
+    so re-running schwab_auth.py is picked up by a long-running process
+    (the Streamlit server, the trading dashboard) without a restart.
+    schwab-py's own periodic access-token refresh also rewrites the file,
+    which triggers a harmless rebuild from the freshly-refreshed token.
+
     Raises ValueError with a user-friendly message on auth failure.
     """
     import schwab
 
-    cache_key = (app_key, str(Path(token_file).expanduser()))
-    if cache_key in _client_cache:
-        return _client_cache[cache_key]
-
     token_path = Path(token_file).expanduser()
+    cache_key = (app_key, str(token_path))
+    mtime = _token_mtime(token_path)
+
+    cached = _client_cache.get(cache_key)
+    if cached is not None and cached[1] == mtime:
+        return cached[0]
+
     try:
         client = schwab.auth.client_from_token_file(
             str(token_path), app_key, app_secret
@@ -70,7 +123,10 @@ def get_client(app_key: str, app_secret: str, callback_url: str,
             "Run: uv run options-scanner/schwab_auth.py"
         ) from exc
 
-    _client_cache[cache_key] = client
+    # Re-stat after building: client_from_token_file may refresh-and-rewrite
+    # the file on load, and the login flow just created it — cache the
+    # post-build mtime so the next call doesn't rebuild needlessly.
+    _client_cache[cache_key] = (client, _token_mtime(token_path))
     return client
 
 

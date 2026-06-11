@@ -23,7 +23,7 @@ import pandas as pd
 import streamlit as st
 
 from options_scanner.compute.top_ranks import compute_top_ranks
-from options_scanner.format import STRIKE_D3_FORMAT
+from options_scanner.format import STRIKE_D3_FORMAT, strike_tick_values
 from options_scanner.display.scan_stamp import scan_stamp_color, scan_stamp_text
 from options_scanner.display.iv_surface_3d import render_iv_surface_3d
 
@@ -180,9 +180,21 @@ def show_iv_chart(df: pd.DataFrame, spot: float, mode: str,
                 fit_range = (float(_anchors["strike"].min()),
                              float(_anchors["strike"].max()))
         if view == "3D surface":
+            # The fitted mesh needs both wings to span spot: with OTM-only
+            # filtering a single option type's in-fit anchors sit on one side of
+            # spot, so a single-type surface clips at the spot plane. Pass the
+            # full two-sided fit frame (both calls and puts) for the mesh; the
+            # dots still use the single-type overlay_df. (For "both", overlay_df
+            # is already two-sided, so reuse it.)
+            if df_full is not None and not df_full.empty:
+                fit_frame = (overlay_df if mode not in ("call", "put")
+                             else _prep(df_full))
+            else:
+                fit_frame = None
             render_iv_surface_3d(overlay_df, spot, ticker, mode, buy,
                                  fit_range, delta_range=delta_range,
-                                 min_oi=min_oi, min_vol=min_vol, top_n=top_n)
+                                 min_oi=min_oi, min_vol=min_vol, top_n=top_n,
+                                 fit_frame=fit_frame)
         else:
             _render_all_expirations(overlay_df, spot, ticker, mode, fit_range)
         return
@@ -294,7 +306,10 @@ def show_iv_chart(df: pd.DataFrame, spot: float, mode: str,
     base_x = alt.X(
         "strike:Q", title="Strike",
         scale=alt.Scale(domain=[x_min, x_max]),
-        axis=alt.Axis(format=STRIKE_D3_FORMAT),
+        axis=alt.Axis(
+            format=STRIKE_D3_FORMAT,
+            values=strike_tick_values(sub["strike"], x_min, x_max) or alt.Undefined,
+        ),
     )
     y_scale = alt.Scale(domain=[y_min, y_max])
     base_y = alt.Y("IV%:Q", title="Implied Volatility (%)", scale=y_scale)
@@ -519,7 +534,10 @@ def _render_all_expirations(frame: pd.DataFrame, spot: float,
     base_x = alt.X(
         "strike:Q", title="Strike",
         scale=alt.Scale(domain=[x_min, x_max]),
-        axis=alt.Axis(format=STRIKE_D3_FORMAT),
+        axis=alt.Axis(
+            format=STRIKE_D3_FORMAT,
+            values=strike_tick_values(frame["strike"], x_min, x_max) or alt.Undefined,
+        ),
     )
     y_enc = alt.Y("FittedIV%:Q", title="Fitted IV (%)",
                   scale=alt.Scale(domain=[y_min, y_max]))

@@ -22,6 +22,7 @@ import pandas as pd
 import streamlit as st
 
 from options_scanner.compute.top_ranks import compute_top_ranks
+from options_scanner.defaults import default_delta_range
 from options_scanner.display.chain_table import show_chain_table
 from options_scanner.display.gex_chart import show_gex_chart
 from options_scanner.display.iv_chart import show_iv_chart
@@ -39,14 +40,14 @@ from options_scanner import iv_algorithms, iv_scores
 from options_scanner.iv_filters import DEFAULT_CONFIG as FILTER_DEFAULT, SurfaceFilterConfig
 from options_scanner.mc_ui import position_from_chain_row, render_mc_panel
 from options_scanner.recent_scans import build_label, load as load_recent, save as save_recent
-from options_scanner.ui_theme import badge, empty_state, metric_card, section_header
+from options_scanner.ui_theme import (
+    badge, empty_state, metric_card, render_schwab_reauth_hint, section_header,
+)
 
 
 # Surface-fit presets — shared by the preset pill and the advanced section
-# (which renders below the Scan button in tab_single).
-_V2_FILTERS_SF: SurfaceFilterConfig = FILTER_DEFAULT + (
-    ("exclude_earnings", frozenset()),
-)
+# (which renders below the Scan button in tab_single). Both presets use
+# the default filters, which include exclude_earnings as of 2026-06.
 _SF_PRESETS = {
     "Global": (
         FILTER_DEFAULT,
@@ -54,7 +55,7 @@ _SF_PRESETS = {
         ("raw_pp", frozenset()),
     ),
     "Per-expiry": (
-        _V2_FILTERS_SF,
+        FILTER_DEFAULT,
         ("per_expiration", frozenset({("weights", "inv_spread")})),
         ("zscore", frozenset()),
     ),
@@ -73,7 +74,8 @@ def _surface_fit_controls() -> str:
             key="s_sf_preset",
             help="Surface fit. Global = one polynomial across the chain + "
                  "raw IV+pp. Per-expiry (LGbengs) = per-expiration "
-                 "spread-weighted fit, earnings excluded, ranked by z-score.",
+                 "spread-weighted fit, ranked by z-score. Both exclude "
+                 "earnings-spanning options from the fit.",
         )
     return preset
 
@@ -177,6 +179,13 @@ def tab_single() -> None:
             with rc3:
                 roll_exp = st.date_input("Current expiration", key="s_roll_exp")
         else:
+            def _sync_s_delta() -> None:
+                """Reset the delta band to the new direction's default when the
+                Sell/Buy toggle flips. A range nudged within a direction sticks;
+                flipping direction re-seeds it (sell ≈ OTM, buy ≈ near-ATM)."""
+                _b = st.session_state.get("s_action", "").startswith("Buy")
+                st.session_state["s_delta"] = default_delta_range(_b)
+
             a1, a2, a3 = st.columns([2.2, 1.8, 3.0])
             with a1:
                 action = st.radio(
@@ -184,6 +193,7 @@ def tab_single() -> None:
                     ["Sell (IV-rich candidates)", "Buy (IV-cheap candidates)"],
                     horizontal=True,
                     key="s_action",
+                    on_change=_sync_s_delta,
                 )
                 buy = action.startswith("Buy")
             with a2:
@@ -215,7 +225,8 @@ def tab_single() -> None:
             )
         with n5:
             delta_range = st.slider("Delta Range (abs value)", 0.0, 1.0,
-                                    (0.10, 0.50), step=0.05, key="s_delta")
+                                    default_delta_range(False), step=0.05,
+                                    key="s_delta")
         with n6:
             top_n = st.number_input("Top N", value=10, min_value=1,
                                     max_value=50, key="s_top")
@@ -272,11 +283,19 @@ def tab_single() -> None:
                                            key="s_sf_use_delta")
                 sf_use_min_oi = st.checkbox("Min OI for fit", value=False,
                                             key="s_sf_use_min_oi")
-                sf_excl_earn = st.checkbox("Exclude earnings", value=False,
+                sf_excl_earn = st.checkbox("Exclude earnings", value=True,
                                            key="s_sf_excl_earn",
                                            help="Drop earnings-spanning options "
                                                 "from the fit — their IV premium "
                                                 "is legitimate event risk.")
+                sf_fresh = st.checkbox("Fresh quotes only", value=False,
+                                       key="s_sf_fresh",
+                                       help="Drop contracts that haven't "
+                                            "traded in days and show no "
+                                            "volume today — their broker IV "
+                                            "is likely stale. Yahoo only; "
+                                            "Schwab/Moomoo rows pass "
+                                            "through.")
             with sf2:
                 sf_spread_pct = st.number_input(
                     "Max spread % of mid", value=50, min_value=1, max_value=200,
@@ -311,6 +330,8 @@ def tab_single() -> None:
                 _sf.append(("min_oi", frozenset({("min_oi", sf_min_oi_val)})))
             if sf_excl_earn:
                 _sf.append(("exclude_earnings", frozenset()))
+            if sf_fresh:
+                _sf.append(("fresh_quotes", frozenset()))
             surface_filter_config: SurfaceFilterConfig = tuple(_sf)
 
             # ── Algorithm + weighting ────────────────────────────────────────
@@ -327,12 +348,27 @@ def tab_single() -> None:
                         "available yet — using the global polynomial.")
                 algo_name = "global_poly"
             weights = a2.selectbox(
-                "Fit weighting", ["none", "oi", "inv_spread"],
+                "Fit weighting", ["none", "oi", "inv_spread", "vega"],
                 format_func={"none": "Equal", "oi": "By open interest",
-                             "inv_spread": "By 1 / spread"}.get,
+                             "inv_spread": "By 1 / spread",
+                             "vega": "By vega"}.get,
                 key="s_sf_weights",
             )
-            algo_config = (algo_name, frozenset({("weights", weights)}))
+            robust = st.selectbox(
+                "Robust fit (outlier handling)",
+                ["none", "huber", "tukey"],
+                format_func={"none": "Off — plain least squares",
+                             "huber": "Huber — downweight outliers",
+                             "tukey": "Tukey — reject far outliers"}.get,
+                key="s_sf_robust",
+                help="Re-fits the surface a few times, reducing the "
+                     "influence of contracts far from it — so a stale "
+                     "high-IV print can't drag the surface toward "
+                     "itself. Huber softens outliers; Tukey ignores "
+                     "extreme ones entirely.",
+            )
+            algo_config = (algo_name, frozenset({("weights", weights),
+                                                 ("robust", robust)}))
 
             # ── Score ────────────────────────────────────────────────────────
             score_names = list(iv_scores.REGISTRY.keys())
@@ -390,8 +426,12 @@ def tab_single() -> None:
 
         if err:
             st.error(f"**{ticker_clean}:** {err}")
+            _scfg = st.session_state.get("schwab_config") or {}
+            render_schwab_reauth_hint(st.session_state.get("data_source", "yahoo"),
+                                      key="schwab_reauth_single",
+                                      token_file=_scfg.get("token_file"))
             st.session_state.pop("single_results", None)
-            st.stop()
+            return
         if df.empty:
             st.warning(
                 f"**{ticker_clean}:** No options found for DTE {int(min_dte)}–"
@@ -399,7 +439,7 @@ def tab_single() -> None:
                 "Try widening the DTE range or check that the ticker has listed options."
             )
             st.session_state.pop("single_results", None)
-            st.stop()
+            return
 
         # Roll: look up close cost for the existing position
         roll_close_cost = None
